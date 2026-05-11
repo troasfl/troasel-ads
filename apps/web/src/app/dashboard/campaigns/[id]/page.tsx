@@ -4,40 +4,89 @@ import { requireAdvertiser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { CampaignStatusBadge } from "@/components/CampaignStatusBadge";
 import { CampaignActions } from "@/components/CampaignActions";
+import { DateRangeFilter } from "@/components/DateRangeFilter";
 import type { CampaignStatus } from "@prisma/client";
 
 export default async function CampaignDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: { from?: string; to?: string };
 }) {
   const advertiser = await requireAdvertiser();
   const { id } = await params;
+  const { from, to } = searchParams;
 
   const campaign = await db.campaign.findUnique({ where: { id } });
   if (!campaign || campaign.advertiserId !== advertiser.id) {
     notFound();
   }
 
-  const [impressions, clicks, conversions] = await Promise.all([
+  const fromDate = from ? new Date(from) : undefined;
+  const toDate = to ? new Date(to + "T23:59:59.999Z") : undefined;
+  const eventDateFilter =
+    fromDate || toDate
+      ? {
+          occurredAt: {
+            ...(fromDate && { gte: fromDate }),
+            ...(toDate && { lte: toDate }),
+          },
+        }
+      : {};
+  const commDateFilter =
+    fromDate || toDate
+      ? {
+          computedAt: {
+            ...(fromDate && { gte: fromDate }),
+            ...(toDate && { lte: toDate }),
+          },
+        }
+      : {};
+
+  const [impressions, clicks, conversions, commissionAgg] = await Promise.all([
     db.trackingEvent.count({
-      where: { campaignId: id, eventType: "IMPRESSION", isDuplicate: false },
+      where: {
+        campaignId: id,
+        eventType: "IMPRESSION",
+        isDuplicate: false,
+        ...eventDateFilter,
+      },
     }),
     db.trackingEvent.count({
-      where: { campaignId: id, eventType: "CLICK", isDuplicate: false },
+      where: {
+        campaignId: id,
+        eventType: "CLICK",
+        isDuplicate: false,
+        ...eventDateFilter,
+      },
     }),
     db.trackingEvent.count({
-      where: { campaignId: id, eventType: "CONVERSION", isDuplicate: false },
+      where: {
+        campaignId: id,
+        eventType: "CONVERSION",
+        isDuplicate: false,
+        ...eventDateFilter,
+      },
+    }),
+    db.commissionEntry.aggregate({
+      where: { campaignId: id, ...commDateFilter },
+      _sum: { amount: true },
     }),
   ]);
 
-  const commission = await db.commissionEntry.aggregate({
-    where: { campaignId: id },
-    _sum: { amount: true },
-  });
-
-  const spend = Number(campaign.budgetSpent);
+  const commission = Number(commissionAgg._sum.amount ?? 0);
+  // For date-filtered views, period spend = commissions accrued in that period.
+  // For all-time view, use the campaign's authoritative budgetSpent accumulator.
+  const spend =
+    fromDate || toDate ? commission : Number(campaign.budgetSpent);
   const ctr = impressions > 0 ? (clicks / impressions) * 100 : 0;
+
+  const csvParams = new URLSearchParams({
+    ...(from ? { from } : {}),
+    ...(to ? { to } : {}),
+  });
+  const csvHref = `/api/campaigns/${id}/export${csvParams.toString() ? `?${csvParams}` : ""}`;
 
   return (
     <div>
@@ -64,7 +113,21 @@ export default async function CampaignDetailPage({
             {campaign.destinationUrl}
           </a>
         </div>
-        <CampaignActions campaignId={campaign.id} currentStatus={campaign.status as CampaignStatus} />
+        <CampaignActions
+          campaignId={campaign.id}
+          currentStatus={campaign.status as CampaignStatus}
+        />
+      </div>
+
+      <div className="flex items-center justify-between mb-4 gap-4 flex-wrap">
+        <DateRangeFilter from={from} to={to} />
+        <a
+          href={csvHref}
+          download
+          className="text-sm font-medium text-blue-600 hover:underline whitespace-nowrap"
+        >
+          Export CSV
+        </a>
       </div>
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5 mb-8">
@@ -102,11 +165,11 @@ export default async function CampaignDetailPage({
           />
           <Detail
             label="Budget Remaining"
-            value={`$${(Number(campaign.budgetTotal) - spend).toLocaleString("en-US", { minimumFractionDigits: 2 })}`}
+            value={`$${(Number(campaign.budgetTotal) - Number(campaign.budgetSpent)).toLocaleString("en-US", { minimumFractionDigits: 2 })}`}
           />
           <Detail
             label="Commission Earned"
-            value={`$${Number(commission._sum.amount ?? 0).toFixed(2)}`}
+            value={`$${commission.toFixed(2)}${fromDate || toDate ? " (period)" : ""}`}
           />
           {campaign.startDate && (
             <Detail
