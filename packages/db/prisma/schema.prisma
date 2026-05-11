@@ -1,0 +1,160 @@
+// Troasel Ads — Prisma schema
+// Conventions: append-only commission ledger, partition events by time_month
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Advertisers ──────────────────────────────────────────────────────────────
+
+model Advertiser {
+  id        String   @id @default(cuid())
+  clerkId   String   @unique
+  email     String   @unique
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaigns Campaign[]
+  payouts   Payout[]
+}
+
+// ── Campaigns ─────────────────────────────────────────────────────────────────
+
+enum BidType {
+  CPC           // cost per click
+  CPM           // cost per 1000 impressions
+  CPA           // cost per acquisition / conversion (fixed)
+  REVENUE_SHARE // % of conversion revenue
+}
+
+enum CampaignStatus {
+  ACTIVE
+  PAUSED
+  ENDED
+  ARCHIVED
+}
+
+model Campaign {
+  id           String         @id @default(cuid())
+  advertiserId String
+  name         String
+  status       CampaignStatus @default(ACTIVE)
+
+  bidType        BidType
+  bidAmount      Decimal?  // for CPC (per click) / CPM (per 1k imps)
+  commissionRate Decimal?  // fraction 0-1, for REVENUE_SHARE or CPA %
+
+  destinationUrl String
+  budgetTotal    Decimal
+  budgetSpent    Decimal  @default(0)
+
+  startDate DateTime?
+  endDate   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  advertiser       Advertiser       @relation(fields: [advertiserId], references: [id])
+  trackingEvents   TrackingEvent[]
+  commissionEntries CommissionEntry[]
+
+  @@index([status, startDate, endDate])
+}
+
+// ── Tracking Events ───────────────────────────────────────────────────────────
+
+enum EventType {
+  IMPRESSION
+  CLICK
+  CONVERSION
+}
+
+enum EventSource {
+  REDIRECT  // click via our redirect endpoint
+  PIXEL     // JS/img pixel
+  S2S       // server-side postback
+}
+
+model TrackingEvent {
+  id         String    @id @default(cuid())
+  campaignId String
+  clickId    String?   // links conversion back to originating click
+
+  eventType  EventType
+  source     EventSource
+  occurredAt DateTime  @default(now())
+
+  ip                String?
+  userAgent         String?
+  referer           String?
+
+  conversionRevenue Decimal? // only for CONVERSION events
+  conversionCurrency String? @default("USD")
+
+  isDuplicate Boolean @default(false)
+  dedupeKey   String? // stored in Redis; echoed here for audit trail
+
+  createdAt DateTime @default(now())
+
+  campaign         Campaign         @relation(fields: [campaignId], references: [id])
+  commissionEntry  CommissionEntry?
+
+  @@index([campaignId, eventType, occurredAt])
+  @@index([clickId])
+  @@index([occurredAt]) // for time-range queries / future partitioning
+}
+
+// ── Commission Ledger ─────────────────────────────────────────────────────────
+
+enum EntryType {
+  EARN     // positive commission earned
+  REVERSAL // negative, corrects a prior EARN
+}
+
+// Append-only. Never UPDATE or DELETE rows — use REVERSAL entries.
+model CommissionEntry {
+  id               String    @id @default(cuid())
+  campaignId       String
+  trackingEventId  String    @unique
+  entryType        EntryType @default(EARN)
+  amount           Decimal   // positive for EARN, negative for REVERSAL
+  computedAt       DateTime  @default(now())
+  reversalForId    String?   // if entryType=REVERSAL, points to original EARN
+
+  campaign       Campaign      @relation(fields: [campaignId], references: [id])
+  trackingEvent  TrackingEvent @relation(fields: [trackingEventId], references: [id])
+
+  @@index([campaignId, computedAt])
+  @@index([computedAt])
+}
+
+// ── Payouts ───────────────────────────────────────────────────────────────────
+
+enum PayoutStatus {
+  PENDING
+  INVOICED
+  PAID
+  VOID
+}
+
+model Payout {
+  id               String       @id @default(cuid())
+  advertiserId     String
+  periodStart      DateTime
+  periodEnd        DateTime
+  totalCommission  Decimal
+  status           PayoutStatus @default(PENDING)
+  stripeInvoiceId  String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  advertiser Advertiser @relation(fields: [advertiserId], references: [id])
+
+  @@index([advertiserId, periodStart])
+}

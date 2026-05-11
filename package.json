@@ -1,0 +1,18 @@
+{
+  "name": "troasel-ads",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "db:generate": "pnpm --filter @troasel/db generate",
+    "db:migrate": "pnpm --filter @troasel/db migrate:dev",
+    "db:migrate:deploy": "pnpm --filter @troasel/db migrate:deploy",
+    "db:push": "pnpm --filter @troasel/db db:push"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}
